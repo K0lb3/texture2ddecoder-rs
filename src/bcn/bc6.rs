@@ -675,7 +675,8 @@ pub fn decode_bc6_block(data: &[u8], outbuf: &mut [u32], signed: bool) {
         }
 
         if mi.transformed {
-            let mask = (1 << mi.endpoint_bits) - 1;
+            // endpoint_bits is 16 in one mode, where `1 << 16` would overflow a u16
+            let mask: u16 = u16::MAX >> (16 - mi.endpoint_bits);
 
             ep_r[ii] = ep_r[ii].overflowing_add(ep_r[0]).0 & mask;
             ep_g[ii] = ep_g[ii].overflowing_add(ep_g[0]).0 & mask;
@@ -757,4 +758,29 @@ pub fn decode_bc6_block_signed(data: &[u8], outbuf: &mut [u32]) {
 #[inline]
 pub fn decode_bc6_block_unsigned(data: &[u8], outbuf: &mut [u32]) {
     decode_bc6_block(data, outbuf, false);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sixteen_bit_transformed_endpoints_are_not_masked_to_zero() {
+        // The 16-bit transformed mode with every other bit set: endpoint 0 is 0xFFFF in each
+        // channel and every 4-bit delta is -1, so endpoint 1 is 0xFFFE. All indices are 15 (the
+        // anchor's 3 bits read 7), so every texel is (nearly) endpoint 1 and as bright as
+        // endpoint 0. A zero mask would make endpoint 1 black.
+        let mode = (0..32u8)
+            .find(|&m| {
+                let mi = &S_BC6H_MODE_INFO[m as usize];
+                m & 2 != 0 && mi.transformed && mi.endpoint_bits == 16
+            })
+            .unwrap();
+        let mut block = [0xFFu8; 16];
+        block[0] = 0xE0 | mode;
+        let mut out = [0u32; 16];
+        decode_bc6_block_unsigned(&block, &mut out);
+        assert!(out.iter().all(|&p| p == out[0]), "{out:08x?}");
+        assert_ne!(out[0] & 0x00FF_FFFF, 0, "{out:08x?}");
+    }
 }
