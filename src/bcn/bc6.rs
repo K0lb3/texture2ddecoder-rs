@@ -272,49 +272,51 @@ static S_BC6H_MODE_INFO: [Bc6hModeInfo; 32] = [
     },
 ];
 
-fn unquantize(_value: u16, _signed: bool, _endpoint_bits: usize) -> u16 {
-    let max_value: u16 = 1 << (_endpoint_bits - 1);
-
+fn unquantize(_value: u16, _signed: bool, _endpoint_bits: usize) -> i32 {
     if _signed {
         if _endpoint_bits >= 16 {
-            return _value;
+            return _value as i16 as i32;
         }
 
-        let sign: bool = _value & 0x8000 != 0;
-        let _value = _value & 0x7fff;
-
-        let unq: u16;
-
-        if 0 == _value {
-            unq = 0;
-        } else if _value >= max_value - 1 {
-            unq = 0x7fff;
+        let value = _value as i16 as i32;
+        let sign = value < 0;
+        let magnitude = value.abs();
+        let unq: i32 = if magnitude == 0 {
+            0
+        } else if magnitude >= (1 << (_endpoint_bits - 1)) - 1 {
+            0x7fff
         } else {
-            unq = ((((_value as u32) << 15) + 0x4000) >> (_endpoint_bits - 1)) as u16;
+            ((((magnitude as u32) << 15) + 0x4000) >> (_endpoint_bits - 1)) as i32
+        };
+
+        if sign {
+            -unq
+        } else {
+            unq
         }
-
-        return if sign { u16::MAX - unq + 1 } else { unq };
+    } else if _endpoint_bits >= 15 {
+        _value as i32
+    } else if _value == 0 {
+        0
+    } else if u32::from(_value) == (1u32 << _endpoint_bits) - 1 {
+        0xffff
+    } else {
+        ((((_value as u32) << 15) + 0x4000) >> (_endpoint_bits - 1)) as i32
     }
-
-    if _endpoint_bits >= 15 {
-        return _value;
-    }
-
-    if 0 == _value {
-        return 0;
-    }
-
-    if _value == max_value {
-        return u16::MAX;
-    }
-
-    ((((_value as u32) << 15) + 0x4000) >> (_endpoint_bits - 1)) as u16
 }
 
-fn finish_unquantize(_value: u16, _signed: bool) -> u16 {
+fn finish_unquantize(_value: i32, _signed: bool) -> u16 {
     if _signed {
-        let sign: u16 = _value & 0x8000;
-        (((_value & 0x7fff) as u32 * 31) >> 5) as u16 | sign
+        let scaled = if _value < 0 {
+            -(((-_value) * 31) >> 5)
+        } else {
+            (_value * 31) >> 5
+        };
+        if scaled < 0 {
+            0x8000 | ((-scaled) as u16)
+        } else {
+            scaled as u16
+        }
     } else {
         ((_value as u32 * 31) >> 6) as u16
     }
@@ -689,11 +691,9 @@ pub fn decode_bc6_block(data: &[u8], outbuf: &mut [u32], signed: bool) {
         }
     });
 
-    (0..num_subsets * 2).for_each(|ii| {
-        ep_r[ii] = unquantize(ep_r[ii], signed, mi.endpoint_bits);
-        ep_g[ii] = unquantize(ep_g[ii], signed, mi.endpoint_bits);
-        ep_b[ii] = unquantize(ep_b[ii], signed, mi.endpoint_bits);
-    });
+    let ep_r: [i32; 4] = ep_r.map(|v| unquantize(v, signed, mi.endpoint_bits));
+    let ep_g: [i32; 4] = ep_g.map(|v| unquantize(v, signed, mi.endpoint_bits));
+    let ep_b: [i32; 4] = ep_b.map(|v| unquantize(v, signed, mi.endpoint_bits));
 
     let partition_set_idx = if mi.partition_bits != 0 {
         bit.read(5) as usize
@@ -723,24 +723,21 @@ pub fn decode_bc6_block(data: &[u8], outbuf: &mut [u32], signed: bool) {
             let num = index_bits - anchor as usize;
             let index = bit.read(num) as usize;
 
-            let fc = factors[index] as u32;
+            let fc = factors[index] as i32;
             let fca = 64 - fc;
             let fcb = fc;
 
             subset_index *= 2;
             let rr = finish_unquantize(
-                ((ep_r[subset_index] as u32 * fca + ep_r[subset_index + 1] as u32 * fcb + 32) >> 6)
-                    as u16,
+                (ep_r[subset_index] * fca + ep_r[subset_index + 1] * fcb + 32) >> 6,
                 signed,
             );
             let gg = finish_unquantize(
-                ((ep_g[subset_index] as u32 * fca + ep_g[subset_index + 1] as u32 * fcb + 32) >> 6)
-                    as u16,
+                (ep_g[subset_index] * fca + ep_g[subset_index + 1] * fcb + 32) >> 6,
                 signed,
             );
             let bb = finish_unquantize(
-                ((ep_b[subset_index] as u32 * fca + ep_b[subset_index + 1] as u32 * fcb + 32) >> 6)
-                    as u16,
+                (ep_b[subset_index] * fca + ep_b[subset_index + 1] * fcb + 32) >> 6,
                 signed,
             );
 
